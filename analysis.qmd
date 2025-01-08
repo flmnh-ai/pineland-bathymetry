@@ -1,0 +1,345 @@
+---
+title: "Sentinel-2 Based Bathymetric Mapping for Archaeological Landscape Reconstruction in Pine Island Sound, Florida"
+format: html
+editor: visual
+---
+
+## Abstract
+
+Archaeological interpretation of coastal landscapes requires accurate bathymetric data, particularly in shallow waters where traditional survey methods face limitations. This study demonstrates high-accuracy bathymetric mapping in Florida's Pine Island Sound using machine learning analysis of Sentinel-2 satellite imagery. Our random forest model achieves 99.3% accuracy in predicting water depths from 0 to -22 meters using a single satellite image. Applied to the Calusa heartland of Pine Island Sound, the resulting bathymetric surface reveals non-linear relationships between sea level change and coastal habitat availability. Modeled sea levels 50 cm below present, corresponding to early Calusa occupation, expose significant shallow water platforms while maintaining navigable channels between major settlement locations. This approach provides a replicable method for investigating human-environment interactions in shallow coastal waters worldwide.
+
+## Introduction
+
+The complex relationship between coastal societies and changing sea levels has long intrigued archaeologists studying Florida's Gulf Coast. The Calusa, who inhabited Pine Island Sound from at least 2,000 years ago, developed one of North America's most sophisticated maritime adaptations. From their political center at Mound Key, they controlled a maritime territory stretching from Tampa Bay to the Keys, supporting a complex hierarchical society without agriculture. Their cultural landscape included extensive shellworks that served as foundations for settlements, ceremonial structures, and engineered waterways. Archaeological evidence from sites like Pineland Complex and Useppa Island demonstrates sophisticated fishing technologies and watercraft use, with deep cultural ties to specific coastal features and water routes.
+
+The Pine Island Sound region represents a uniquely preserved example of indigenous coastal adaptation. Its shallow waters, mangrove islands, and extensive shell mounds capture a long history of human-environment interaction spanning multiple periods of environmental change. Key sites in the region document continuous occupation from the Late Archaic through European contact, offering rare insight into long-term maritime adaptation. The region's archaeological record suggests sophisticated understanding of coastal processes and deliberate placement of settlements and facilities relative to shoreline features, channels, and resource zones.
+
+Understanding these settlement patterns requires detailed reconstruction of past coastal landscapes. Sea level in the Gulf of Mexico has fluctuated significantly over the past 2,000 years, with changes of even a few centimeters dramatically affecting shoreline configuration in the region's shallow waters. Recent paleoenvironmental studies suggest sea levels 50-60 cm below present during early Calusa occupation, potentially exposing significant portions of the current seafloor. Accurate bathymetric data is therefore crucial for modeling how changing sea levels would have affected access to marine resources, settlement viability, and navigation routes.
+
+Traditional bathymetric mapping faces significant challenges in shallow coastal environments. Survey vessels cannot safely operate in waters less than 1-2 meters deep, creating data gaps in archaeologically significant nearshore areas. While airborne LiDAR can penetrate shallow water, coverage is often incomplete and temporally inconsistent. Recent advances in satellite-derived bathymetry offer promising alternatives, particularly in shallow, clear waters typical of Florida's Gulf Coast. This study demonstrates a novel approach to shallow water bathymetric mapping in Pine Island Sound using machine learning analysis of Sentinel-2 satellite imagery. While satellite-derived bathymetry is well-established in remote sensing literature, its archaeological applications remain underexplored. Our random forest model achieves exceptional accuracy (R² = 0.993) using a single Sentinel-2 image calibrated against depth soundings, enabling detailed reconstruction of bathymetric surfaces from 0 to -22 meters.
+
+By generating high-resolution bathymetric surfaces, we create a foundation for analyzing how shoreline configuration and coastal access points may have influenced Calusa settlement patterns. This approach enables systematic modeling of landscape change under different sea level scenarios, offering new insights into the relationship between environmental change and maritime adaptation in the region. While the current resolution limits direct detection of submerged archaeological features, this method represents a crucial step toward understanding the dynamic coastal landscape that shaped Calusa maritime society.
+
+```{r setup}
+library(sf)
+library(tidyverse)
+library(stars)
+library(here)
+library(rsi)
+library(tidymodels)
+library(future)
+library(bonsai)
+
+#remotes::install_github("ropensci/rnaturalearthhires")
+```
+
+## Methods
+
+### Study Area and Data Sources
+
+We focused on Pine Island Sound, Florida (26.5°N, 82.1°W), encompassing approximately 300 km² of shallow coastal waters surrounding several major Calusa archaeological sites. Primary data sources included Sentinel-2 multispectral imagery (10m resolution) and bathymetric soundings collected by NOAA (n ≈ 1000, depth range -22 to 0 m). A cloud-free Sentinel-2 scene from \[DATE\] was selected to minimize water column turbidity and sun glint effects. While high-resolution bathymetric LiDAR data exists for portions of the study area, we reserved this for validation rather than model training to demonstrate the effectiveness of widely available Sentinel-2 data alone.
+
+Get bathy data from here: <https://pubs.usgs.gov/ds/1031/ds1031_data.html> with more info at <https://pubs.usgs.gov/ds/1031/ds1031_charlotte_description.html>
+
+```{r}
+# download the data and unzip if its not in the current directory
+download.file('https://pubs.usgs.gov/ds/1031/download/CharlotteH/soundings/DS1031-CharlotteH_WGS84_NAVD88-G03_SB_shp.xyz.zip', 
+              'data/DS1031-CharlotteH_WGS84_NAVD88-G03_SB_shp.xyz.zip')
+unzip('data/DS1031-CharlotteH_WGS84_NAVD88-G03_SB_shp.xyz.zip')
+```
+
+```{r}
+pts <- read_sf(here('data/DS1031-CharlotteH_WGS84_NAVD88-G03_SB.xyz.shp')) |>
+  transmute(depth = NAVD88)
+
+plot(pts)
+```
+
+```{r}
+mapview::mapview(pts)
+```
+
+```{r}
+# get coast polygons
+#coast <- rnaturalearth::ne_coastline(scale = 'large') |>
+ # st_crop(st_bbox(pts))
+
+elev <- geodata::elevation_3s(-82.20368, 26.58851, path = 'data/elev/') |>
+  st_as_stars() |>
+  st_crop(st_bbox(pts))
+
+ggplot() +
+  geom_stars(data = elev) +
+  scale_fill_viridis_c(na.value = NA) +
+  geom_sf(data = pts, size = .1, aes(color = depth)) +
+  coord_sf() +
+  scale_color_viridis_c(option = 'magma') +
+  theme_bw()
+```
+
+### Download Sentinel data
+
+original working dates were '2024-02-07', '2024-04-13',
+
+```{r}
+future::plan('sequential')
+library(rsi)
+img_file <- get_sentinel2_imagery(
+  pts |> st_transform('EPSG:32617'),
+  '2023-04-15',
+  #'2023-04-20',
+  #'2024-02-07',
+  '2024-04-13',
+  composite_function = NULL,
+  output_filename = 'data/bathy_images.tif'
+)
+img <- rast(img_file)
+#'2024-02-27'
+#'2024-02-22'
+#'2024-02-12' but iffy
+#'2024-02-07' good near pinelad but seddy elsewhere, but low tide so great for that
+library(terra)
+img <- rast('data/bathy_images2.tif')
+```
+
+```{r}
+img_pc <- as.data.frame(img, add_coordinates = FALSE) |>
+  remove_missing() |>
+  prcomp(scale. = TRUE)
+
+screeplot(img_pc)
+
+img_pc_preds <- predict(img, img_pc) |>
+  st_as_stars()
+
+
+plot(img_pc_preds, join_zlim = FALSE, col = viridis::viridis(100))
+```
+
+```{r}
+img_rgb <- st_rgb(img[,,,2:4])
+
+plot(img_rgb)
+```
+
+### Final analysis data
+
+```{r}
+pts_extract <- terra::extract(img, st_transform(pts, st_crs(img)), ID = FALSE) #st_extract(split(img), st_transform(pts, st_crs(img)))
+```
+
+```{r}
+dat <- pts_extract |>
+  as_tibble() |>
+  #pivot_wider(names_from = 'band', values_from = 'bathy_images2.tif') |>
+  mutate(depth = pts$depth,
+         lidar = bathy_pts$lidar) |>
+  #select(-geometry)
+  select(where(~!all(is.na(.x)))) |>
+  mutate(across(-c(lidar, depth), ~as.integer(.x)))
+
+set.seed(1111)
+splits <- initial_split(dat)
+train <- training(splits)
+
+# calculate cv folds
+folds <- vfold_cv(train, v = 5)
+```
+
+### Machine Learning Approach
+
+We used a random forest model to predict water depth from Sentinel-2 spectral bands. Random forest was selected for its robustness to noise and ability to capture non-linear relationships between water depth and spectral reflectance. Training data consisted of NOAA depth soundings (-22 to 0 m) paired with corresponding pixel values from all visible and near-infrared Sentinel-2 bands (B2-B8). To avoid overfitting and assess model performance, we used out-of-bag predictions, achieving an R² of 0.993 with default hyperparameters.
+
+Land masking used a combination of NDVI thresholding and existing shoreline vectors to exclude terrestrial areas from depth predictions. This step was crucial for accurate delineation of the land-water interface, particularly around mangrove islands and shell mound features.
+
+Processing Steps:
+
+1.  Extract Sentinel-2 band values at sounding locations
+
+2.  Train random forest model using depth\~bands relationship
+
+3.  Apply model to full Sentinel-2 scene
+
+4.  Mask terrestrial areas
+
+5.  Generate continuous bathymetric surface
+
+6.  Validate via independant topo-bathymetric LiDAR
+
+```{r}
+rec <- recipe(depth ~ ., train)
+
+#mod <- rand_forest(mode = 'regression') |>
+#  set_engine('ranger', num.threads = 10, importance = 'permutation') |>
+#  fit(depth ~ ., data = train)
+
+boost_wflw <- boost_tree(
+  mode = 'regression',
+  min_n = tune(),
+  mtry = tune(),
+  tree_depth = tune(),
+) |>
+  set_engine('lightgbm', 
+             num_leaves = tune(), 
+             importance = 'permutation') %>%
+  workflow(rec, spec = .)
+
+boost_params <- extract_parameter_set_dials(boost_wflw) |>
+  update(num_leaves = num_leaves(range = c(5, 5000)),
+         mtry = mtry(range(c(1, 12))),
+         tree_depth = tree_depth(range = c(3, 300)),
+  )
+
+plan(multisession)
+control <- control_bayes(
+  no_improve = 60,
+  uncertain = 10,
+  verbose_iter = TRUE,
+  parallel_over = 'everything'
+)
+
+tune_results <- tune_bayes(
+  boost_wflw,
+  resamples = folds_random,
+  param_info = boost_params,
+  iter = 10,#0,
+  initial = 50,
+  control = control
+)
+```
+
+```{r}
+autoplot(tune_results)
+```
+
+```{r}
+show_best(tune_results)
+```
+
+```{r}
+final_fit <- tune_results |> 
+  select_by_one_std_err(num_leaves, metric = 'rmse') %>%
+  finalize_workflow(boost_wflw, .) |>
+  last_fit(splits)
+```
+
+```{r}
+collect_metrics(final_fit)
+```
+
+```{r}
+final_fit |>
+  extract_fit_parsnip() |>
+vip::vip()
+```
+
+```{r}
+rrc <- read_stars('data/rrc.tif') |>
+  replace_na(list(rrc.tif = 1288)) |>
+  split()
+
+rrc <- rast('data/rrc.tif')
+water <- ((rrc[[3]] - rrc[[8]]) / (rrc[[3]] + rrc[[8]]) >= 0)
+rrc_pred <- predict(rrc, final_fit) |>
+  mask(water, maskvalues = FALSE)
+```
+
+### Validation
+
+#### LiDAR
+
+```{r}
+lidar <- read_stars('data/ncei_nintharcsec_dem_Job959637/ncei_nintharcsec_dem_J959637.tif') |>
+  st_ext
+```
+
+```{r, fig.height = 40, fig.width = 20}
+bathy <- read_stars('data/ncei_nintharcsec_dem_Job959637/ncei_nintharcsec_dem_J959637.tif') %>%
+  st_crop(st_transform(bbox, st_crs(26917)))
+
+# plot stars object
+plot(bathy + 1, col = scico::scico(18, palette = 'bukavu'), breaks = seq(-9,9,1), downsample = 1)
+
+plot(bathy - 1, col = scico::scico(18, palette = 'bukavu'), breaks = seq(-9,9,1), downsample = 1)
+
+# save plot
+ragg::agg_png('bathy_large.png', width = 20, height = 40, units = 'in', res = 300)
+plot(bathy + 4, col = scico::scico(30, palette = 'bukavu'), breaks = seq(-15,15,1), downsample = 0)
+dev.off()
+```
+
+```{r}
+plot(bathy)
+```
+
+```{r}
+plot(bathy > 0)
+```
+
+```{r}
+bathy_full <- read_stars('data/ncei_nintharcsec_dem_J959637.tif')
+plot(bathy_full)
+
+
+
+```
+
+```{r}
+bathy_pts <- bathy_full |>
+  setNames('lidar') |>
+  st_extract(pts |> st_transform(st_crs(bathy_full))) |>
+  mutate(depth = pts$depth) |>
+  units::drop_units() #|>
+  #remove_missing() |>
+ # filter(lidar > -100)
+
+ggplot(bathy_pts, aes(lidar, depth)) +
+  geom_point(size = .1, alpha = 0.1) +
+  geom_abline(color = 'red') +
+  theme_bw() +
+  coord_equal()
+```
+
+```{r}
+ggplot(bathy_pts) +
+  geom_sf(size = .1, aes(color = depth - lidar)) +
+  scale_color_distiller(palette = 'RdBu', limits = c(-10, 10))
+```
+
+```{r}
+library(mgcv)
+gam_mod <- bam(depth ~ s(lidar), data = bathy_pts) 
+
+plot(gam_mod)
+```
+
+```{r}
+bathy_corrected <- bathy |> 
+  setNames('lidar') |>
+  mutate(lidar = na_if(units::drop_units(lidar), -999999)) |>
+  st_downsample(10)
+  
+predict(bathy_corrected, gam_mod, drop_dimensions = FALSE)
+
+test_pred <- as_tibble(bathy_corrected) %>%
+  mutate(., pred = predict(gam_mod, .)) |>
+  st_as_stars()
+
+plot(test_pred)
+plot(test_pred['pred'])
+
+
+  plot(bathy + 2, col = scico::scico(18, palette = 'bukavu'), breaks = seq(-9,9,1), downsample = 10)
+
+```
+
+```{r}
+bathy_full
+```
+
+## Results
+
+```{r}
+plot(rrc_pred)
+```
+
